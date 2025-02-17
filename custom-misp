@@ -1,0 +1,166 @@
+#!/var/ossec/framework/python/bin/python3
+import sys
+import os
+from socket import socket, AF_UNIX, SOCK_DGRAM
+import json
+import ipaddress
+import re
+import requests
+from requests.exceptions import ConnectionError
+
+# Wazuh queue socket
+pwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+socket_addr = f"{pwd}/queue/sockets/queue"
+
+# MISP configuration
+MISP_BASE_URL = "https://{IP/Domain MISP}/attributes/restSearch/"
+MISP_API_KEY = "API Key"
+MISP_HEADERS = {
+    "Content-Type": "application/json",
+    "Authorization": MISP_API_KEY,
+    "Accept": "application/json",
+}
+
+
+def send_event(msg, agent=None):
+    """
+    Sends the final event (dictionary) to Wazuh's queue via a Unix socket.
+    """
+    if not agent or agent["id"] == "000":
+        message = f"1:misp:{json.dumps(msg)}"
+    else:
+        agent_id = agent["id"]
+        agent_name = agent["name"]
+        agent_ip = agent["ip"] if "ip" in agent else "any"
+        message = f"1:[{agent_id}] ({agent_name}) {agent_ip}->misp:{json.dumps(msg)}"
+
+    with socket(AF_UNIX, SOCK_DGRAM) as sock:
+        sock.connect(socket_addr)
+        sock.send(message.encode())
+
+
+def extract_event_param(alert):
+    """
+    Extracts the relevant 'wazuh_event_param' needed for MISP searching
+    based on event_source and event_type. Returns None if no valid param found.
+    """
+    event_source = alert["rule"]["groups"][0]
+    event_type = alert["rule"]["groups"][2]
+
+    # Regex pattern for a 64-char SHA256
+    regex_file_hash = re.compile(r"\b[A-Fa-f0-9]{64}\b")
+
+    try:
+        if event_source == "windows":
+            if event_type in ("sysmon_event1", "sysmon_event6", "sysmon_event7",
+                              "sysmon_event_23", "sysmon_event_24", 
+                              "sysmon_event_25"):
+                # All these Sysmon events rely on file hashes
+                hashes_str = alert["data"]["win"]["eventdata"]["hashes"]
+                return regex_file_hash.search(hashes_str).group(0)
+
+            elif event_type == "sysmon_event_15":
+                # All these Sysmon events rely on file hashes
+                hashes_str = alert["data"]["win"]["eventdata"]["hash"]
+                return regex_file_hash.search(hashes_str).group(0)
+
+            elif event_type == "sysmon_event3":
+                # Destination IP is included, must be IPv4 and global
+                if alert["data"]["win"]["eventdata"]["destinationIsIpv6"] == "false":
+                    dst_ip = alert["data"]["win"]["eventdata"]["destinationIp"]
+                    if ipaddress.ip_address(dst_ip).is_global:
+                        return dst_ip
+                # If IPv6 or not global, return None
+                return None
+
+            elif event_type == "sysmon_event_22":
+                # DNS Query name
+                return alert["data"]["win"]["eventdata"]["queryName"]
+
+        elif event_source == "linux":
+            if event_type == "sysmon_event3":
+                # Check IPv4 and global
+                if alert["data"]["eventdata"]["destinationIsIpv6"] == "false":
+                    dst_ip = alert["data"]["eventdata"]["DestinationIp"]
+                    if ipaddress.ip_address(dst_ip).is_global:
+                        return dst_ip
+                return None
+
+        elif event_source == "ossec" and event_type == "syscheck_entry_added":
+            # syscheck event
+            return alert["syscheck"]["sha256_after"]
+
+    except (KeyError, IndexError):
+        return None
+
+    return None
+
+
+def query_misp(value):
+    """
+    Queries MISP with the given value and returns the JSON response.
+    If connection fails, returns a special dict with an 'error'.
+    """
+    misp_search_url = f"{MISP_BASE_URL}value:{value}"
+    try:
+        response = requests.get(misp_search_url, headers=MISP_HEADERS, verify=False)
+        return response.json()
+    except ConnectionError:
+        return {"error": "Connection Error to MISP API"}
+
+
+def handle_misp_response(misp_api_response, alert, alert_output):
+    """
+    Processes the MISP API response and populates alert_output if an
+    IoC is found. Finally, sends the event via send_event().
+    """
+    # If we got an error key, handle that
+    if "error" in misp_api_response:
+        alert_output["misp"] = {}
+        alert_output["integration"] = "misp"
+        alert_output["misp"]["error"] = misp_api_response["error"]
+        send_event(alert_output, alert["agent"])
+        return
+
+    # Check if response includes Attributes (IoCs)
+    attributes = misp_api_response.get("response", {}).get("Attribute", [])
+    if attributes:
+        attribute = attributes[0]  # Take the first match
+        alert_output["misp"] = {}
+        alert_output["integration"] = "misp"
+        alert_output["misp"]["source"] = {}
+        alert_output["misp"]["event_id"] = attribute["event_id"]
+        alert_output["misp"]["category"] = attribute["category"]
+        alert_output["misp"]["value"] = attribute["value"]
+        alert_output["misp"]["type"] = attribute["type"]
+        # Optionally include rule description
+        alert_output["misp"]["source"]["description"] = alert["rule"].get("description", "")
+        send_event(alert_output, alert["agent"])
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit("Usage: misp_integration.py <alert_file.json>")
+
+    # Read the alert file
+    with open(sys.argv[1]) as f:
+        alert = json.load(f)
+
+    # Prepare a dictionary for final output (if needed)
+    alert_output = {}
+
+    # Extract the MISP-searchable parameter
+    wazuh_event_param = extract_event_param(alert)
+    if not wazuh_event_param:
+        # If we couldn't extract anything, just exit gracefully
+        sys.exit()
+
+    # Perform the MISP query
+    misp_api_response = query_misp(wazuh_event_param)
+
+    # Handle MISP response (send event if necessary)
+    handle_misp_response(misp_api_response, alert, alert_output)
+
+
+if __name__ == "__main__":
+    main()
