@@ -1,67 +1,71 @@
 #!/usr/bin/env python3
+import warnings
+# ปิด FutureWarning / DeprecationWarning ทั้งหมด
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+# ปิด InsecureRequestWarning เวลาทำ HTTPS request แบบไม่ตรวจ SSL
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 import argparse
-from pymisp import ExpandedPyMISP
+import sys
+from pymisp import ExpandedPyMISP, PyMISPError
 
 def init_misp(url: str, key: str, verify: bool) -> ExpandedPyMISP:
-    """
-    สร้างการเชื่อมต่อกับ MISP
-    """
     return ExpandedPyMISP(url, key, verify)
 
 def fetch_sha256_attributes(misp: ExpandedPyMISP) -> list:
-    """
-    ดึง Attributes ประเภท SHA256 ทั้งหมดจาก MISP
-    """
     return misp.search(
         controller='attributes',
         type_attribute='sha256',
         pythonify=True
     )
 
-def export_to_wazuh(attrs: list, filepath: str):
-    """
-    เขียนไฟล์ CDB list ให้ Wazuh ใช้งาน
-    - แต่ละบรรทัด: "<hash>:"
-    - ไม่มีบรรทัดว่างระหว่างรายการ
-    - กำจัดค่าซ้ำ และเรียงลำดับก่อนเขียน
-    """
+def export_to_wazuh(attrs: list, filepath: str) -> int:
     unique_hashes = set()
     for attr in attrs:
-        value = attr.get('value')
-        if value:
-            unique_hashes.add(value.strip())
-
-    with open(filepath, 'w') as f:
-        for h in sorted(unique_hashes):
-            f.write(f"{h}:\n")
-
-    print(f"Exported {len(unique_hashes)} SHA256 hashes to {filepath}")
+        v = attr.get('value')
+        if v:
+            unique_hashes.add(v.strip())
+    if not unique_hashes:
+        return 0
+    try:
+        with open(filepath, 'w') as f:
+            for h in sorted(unique_hashes):
+                f.write(f"{h}:\n")
+    except:
+        return -1
+    return len(unique_hashes)
 
 def main():
     parser = argparse.ArgumentParser(
         description="Export SHA256 IoCs from MISP to Wazuh CDB list"
     )
-    parser.add_argument(
-        '--url', required=True,
-        help='MISP URL (e.g. https://misp.example.com)'
-    )
-    parser.add_argument(
-        '--key', required=True,
-        help='MISP API Key'
-    )
-    parser.add_argument(
-        '--verify', action='store_true',
-        help='Verify SSL certificates'
-    )
-    parser.add_argument(
-        '--output', default='/var/ossec/etc/lists/malware-hashes',
-        help='Output CDB list path'
-    )
+    parser.add_argument('--url',    required=True, help='MISP URL')
+    parser.add_argument('--key',    required=True, help='MISP API Key')
+    parser.add_argument('--verify', action='store_true', help='Verify SSL')
+    parser.add_argument('--output', default='/var/ossec/etc/lists/malware-hashes',
+                        help='Output CDB list path')
     args = parser.parse_args()
 
-    misp  = init_misp(args.url, args.key, args.verify)
-    attrs = fetch_sha256_attributes(misp)
-    export_to_wazuh(attrs, args.output)
+    try:
+        misp = init_misp(args.url, args.key, args.verify)
+        attrs = fetch_sha256_attributes(misp)
+    except PyMISPError:
+        # silent exit on connection/fetch error
+        sys.exit(1)
+
+    count = export_to_wazuh(attrs, args.output)
+    if count > 0:
+        print(f"Export successful: {count} SHA256 hashes to {args.output}")
+        sys.exit(0)
+    elif count == 0:
+        # ไม่มี hash ให้ export
+        print("No SHA256 hashes found.")
+        sys.exit(2)
+    else:
+        # เขียนไฟล์ล้มเหลว
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
