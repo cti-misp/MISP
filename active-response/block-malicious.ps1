@@ -34,7 +34,7 @@ if ($IOCtype -eq 'ip' -or $IOCtype -eq 'ip-src' -or $IOCtype -eq 'ip-dst') {
             echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $ip removed from blocklist via Windows Firewall" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
         }
     }
-} elseif ($IOCtype -eq 'domain') {
+} elseif ($IOCtype -eq 'domain' -or $IOCtype -eq 'hostname') {
     # Handle domain types
     # Add domain to hosts file and resolve to 127.0.0.1
     $hostsPath = "C:\\Windows\\System32\\drivers\\etc\\hosts"
