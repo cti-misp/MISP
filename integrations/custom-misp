@@ -101,7 +101,7 @@ def query_misp(value):
     Queries MISP with the given value and returns the JSON response.
     If connection fails, returns a special dict with an 'error'.
     """
-    misp_search_url = f"{MISP_BASE_URL}value:{value}"
+    misp_search_url = f"{MISP_BASE_URL}value:{value}/to_ids:1"
     try:
         response = requests.get(misp_search_url, headers=MISP_HEADERS, verify=False)
         return response.json()
