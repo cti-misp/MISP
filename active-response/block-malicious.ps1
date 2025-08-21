@@ -15,12 +15,12 @@ $command = $INPUT_ARRAY."command"
 $hostip = (Get-WmiObject -Class Win32_NetworkAdapterConfiguration | where {$_.DHCPEnabled -ne $null -and $_.DefaultIPGateway -ne $null}).IPAddress | Select-Object -First 1
 
 # Extract IOC (Indicator of Compromise) details from the input array
-$IOCvalue = $INPUT_ARRAY."parameters"."alert"."data"."misp"."value"
-$IOCtype = $INPUT_ARRAY."parameters"."alert"."data"."misp"."type"
-$IOCdescription = $INPUT_ARRAY."parameters"."alert"."data"."misp"."source"."description"
+$IOCvalue = $INPUT_ARRAY."parameters"."alert"."data"."win"."eventdata"."destinationIp"
+$IOCeventid = $INPUT_ARRAY."parameters"."alert"."data"."win"."system"."eventID"
+$IOCvaluequeryname = $INPUT_ARRAY."parameters"."alert"."data"."win"."eventdata"."queryName"
 
 # Check if the IOC is an IP address, domain, or hash based on IOCtype
-if ($IOCtype -eq 'ip' -or $IOCtype -eq 'ip-src' -or $IOCtype -eq 'ip-dst') {
+if ($IOCeventid -eq '3') {
     foreach ($ip in $IOCvalue) {
         # Check if there is an existing firewall rule for the IP
         $existingRule = Get-NetFirewallRule -DisplayName "Wazuh Active Response - $ip" -ErrorAction SilentlyContinue
@@ -34,29 +34,15 @@ if ($IOCtype -eq 'ip' -or $IOCtype -eq 'ip-src' -or $IOCtype -eq 'ip-dst') {
             echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $ip removed from blocklist via Windows Firewall" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
         }
     }
-} elseif ($IOCtype -eq 'domain' -or $IOCtype -eq 'hostname') {
+} elseif ($IOCeventid -eq '22') {
     # Handle domain types
     # Add domain to hosts file and resolve to 127.0.0.1
     $hostsPath = "C:\\Windows\\System32\\drivers\\etc\\hosts"
-    $hostEntry = "127.0.0.1`t$IOCvalue"
+    $hostEntry = "127.0.0.1`t$IOCvaluequeryname"
 
     # Check if the domain is already in the hosts file
-    if (-not (Select-String -Path $hostsPath -Pattern "^127\.0\.0\.1`t$IOCvalue$" -Quiet)) {
+    if (-not (Select-String -Path $hostsPath -Pattern "^127\.0\.0\.1`t$IOCvaluequeryname$" -Quiet)) {
         Add-Content -Path $hostsPath -Value $hostEntry
-        echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $IOCvalue added to hosts file with 127.0.0.1" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
-    }
-} elseif ($IOCtype -eq 'md5' -or $IOCtype -eq 'sha1' -or $IOCtype -eq 'sha256') {
-    # Handle hash types (md5, sha1, sha256)
-    # Extract path from IOCdescription if it contains hash type
-    $pathPattern = "[C-Z]:.*?(?=\sFileCreate)"
-    $pathMatches = [regex]::Matches($IOCdescription, $pathPattern) | Select-Object -First 1
-    $pathmalicious = if ($pathMatches) { $pathMatches.Value } # else { "Path not found in description" }
-
-    # Delete the file at the resolved path
-    if (Test-Path $pathmalicious) {
-        Remove-Item -Path $pathmalicious -Force
-        echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - File $pathmalicious deleted" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
-    } else {
-        echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - File $pathmalicious not found" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
+        echo "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $IOCvaluequeryname added to hosts file with 127.0.0.1" | Out-File -FilePath "C:\Program Files (x86)\ossec-agent\active-response\active-responses.log" -Append -Encoding ascii
     }
 }
