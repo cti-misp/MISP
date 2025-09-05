@@ -27,7 +27,7 @@ then
 fi
 
 # Removing file
-rm -f $FILENAME
+rm -rf $FILENAME
 if [ $? -eq 0 ]; then
  echo "`date '+%Y/%m/%d %H:%M:%S'` $0: $INPUT_JSON Successfully removed threat" >> ${LOG_FILE}
 else
